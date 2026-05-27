@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
 function App() {
@@ -8,12 +8,15 @@ function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
+  
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const fileInputRef = useRef(null);
 
   const fetchData = async () => {
     try {
       setLoading(true);
       setError(null);
-      // We assume backend runs on localhost:8000
       const response = await axios.get('http://localhost:8000/get-merged-data');
       setData(response.data.data);
     } catch (err) {
@@ -47,6 +50,43 @@ function App() {
     }
   };
 
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      setIsSyncing(true);
+      setSyncMessage('');
+      setError(null);
+      const response = await axios.post('http://localhost:8000/upload-csv', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      setSyncMessage(response.data.message || 'Upload successful!');
+      await fetchData();
+    } catch (err) {
+      console.error('Error uploading CSV:', err);
+      setError(err.response?.data?.detail || 'Failed to upload CSV.');
+    } finally {
+      setIsSyncing(false);
+      e.target.value = null;
+      setTimeout(() => setSyncMessage(''), 5000);
+    }
+  };
+
+  const fetchLogs = async () => {
+    try {
+      const res = await axios.get('http://localhost:8000/logs');
+      setLogs(res.data.logs);
+      setLogsOpen(true);
+    } catch (e) {
+      console.error(e);
+      setError('Failed to fetch logs');
+    }
+  };
+
   useEffect(() => {
     fetchData();
   }, []);
@@ -64,7 +104,27 @@ function App() {
           <h1 className="title">Multi-System Integration</h1>
           <p className="subtitle">Data merged from external API and local SQLite DB</p>
         </div>
-        <div style={{ display: 'flex', gap: '1rem' }}>
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+          <input 
+            type="file" 
+            accept=".csv" 
+            ref={fileInputRef} 
+            style={{ display: 'none' }} 
+            onChange={handleFileUpload} 
+          />
+          <button 
+            className="btn-secondary" 
+            onClick={() => fileInputRef.current.click()}
+            disabled={loading || isRefreshing || isSyncing}
+          >
+            Upload CSV
+          </button>
+          <button 
+            className="btn-secondary" 
+            onClick={fetchLogs}
+          >
+            View Logs
+          </button>
           <button 
             className="btn-sync" 
             onClick={handleSync}
@@ -136,12 +196,36 @@ function App() {
               {data.length === 0 && (
                 <tr>
                   <td colSpan="5" style={{ textAlign: 'center', padding: '2rem' }}>
-                    No data available. Click "Sync Data" to seed database.
+                    No data available. Click "Sync Data" or upload a CSV to seed database.
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {logsOpen && (
+        <div className="modal-overlay" onClick={() => setLogsOpen(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>System Logs</h3>
+              <button className="btn-secondary" onClick={() => setLogsOpen(false)} style={{ padding: '0.25rem 0.75rem' }}>Close</button>
+            </div>
+            <div className="logs-container">
+              {logs.length === 0 ? (
+                <p style={{ color: 'var(--text-secondary)' }}>No logs available yet.</p>
+              ) : (
+                logs.map((log, i) => (
+                  <div key={i} className={`log-entry log-${log.level.toLowerCase()}`}>
+                    <span className="log-time">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                    <span className="log-level">[{log.level}]</span>
+                    <span className="log-msg">{log.message}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

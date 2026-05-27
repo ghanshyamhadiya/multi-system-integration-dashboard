@@ -1,18 +1,17 @@
-import logging
-import requests
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from database import engine, get_db
 import models
+from logger import get_logger, get_recent_logs
+from services import fetch_api_data_with_retry, upsert_users, process_csv_upload
 
 # Initialize database tables
 models.Base.metadata.create_all(bind=engine)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logger = get_logger("main")
+logger.info("Starting Multi-System Integration API")
 
 app = FastAPI(title="Multi-System Integration API")
 
@@ -25,60 +24,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-API_URL = "https://jsonplaceholder.typicode.com/users"
-
 @app.get("/fetch-api-data")
 def fetch_api_data_endpoint():
     """Fetch user data from the external REST API."""
-    return fetch_api_data()
-
-def fetch_api_data():
-    logger.info("Fetching data from external API")
-    try:
-        response = requests.get(API_URL, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        logger.error(f"Error fetching API data: {e}")
-        raise HTTPException(status_code=502, detail="Error communicating with external API")
+    return fetch_api_data_with_retry()
 
 @app.post("/sync-data")
 def sync_data(db: Session = Depends(get_db)):
     """Fetch data from API, transform, and sync it with the local SQLite database."""
-    logger.info("Starting data sync process")
-    api_data = fetch_api_data()
+    logger.info("Sync requested via API")
+    api_data = fetch_api_data_with_retry()
+    inserted, updated = upsert_users(db, api_data)
+    return {"message": f"Successfully synced data: {inserted} inserted, {updated} updated."}
+
+@app.post("/upload-csv")
+async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload a CSV file for integration."""
+    logger.info(f"CSV upload requested: {file.filename}")
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Invalid file type. Must be CSV.")
     
-    synced_count = 0
-    updated_count = 0
     try:
-        for user_data in api_data:
-            # Transformation: Extract domain
-            email = user_data.get("email", "")
-            domain = email.split('@')[-1] if '@' in email else "unknown"
-            
-            existing_user = db.query(models.User).filter(models.User.id == user_data["id"]).first()
-            if not existing_user:
-                new_user = models.User(
-                    id=user_data["id"],
-                    name=user_data["name"],
-                    email=email,
-                    domain=domain
-                )
-                db.add(new_user)
-                synced_count += 1
-            else:
-                # Update existing user if needed
-                existing_user.name = user_data["name"]
-                existing_user.email = email
-                existing_user.domain = domain
-                updated_count += 1
-        db.commit()
-        logger.info(f"Sync complete: {synced_count} inserted, {updated_count} updated.")
-        return {"message": f"Successfully synced data: {synced_count} inserted, {updated_count} updated."}
+        content = await file.read()
+        decoded = content.decode('utf-8')
+        inserted, updated = process_csv_upload(db, decoded)
+        return {
+            "message": f"CSV processed: {inserted} inserted, {updated} updated.",
+            "records_inserted": inserted,
+            "records_updated": updated
+        }
     except Exception as e:
-        db.rollback()
-        logger.error(f"Database error during sync: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error during database operation")
+        logger.error(f"Error processing CSV: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process CSV file.")
+
+@app.get("/logs")
+def get_logs():
+    """Return the recent system logs."""
+    return {"logs": get_recent_logs()}
 
 @app.get("/get-merged-data")
 def get_merged_data(db: Session = Depends(get_db)):
@@ -96,7 +78,7 @@ def get_merged_data(db: Session = Depends(get_db)):
 
     # 2. Fetch from API
     try:
-        api_users = fetch_api_data()
+        api_users = fetch_api_data_with_retry()
         api_data = {}
         for user in api_users:
             email = user.get("email", "")
